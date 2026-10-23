@@ -29,6 +29,7 @@ def ask(question: str) -> str:
     if usage is not None:
         print(f"[入力トークン数] {usage.prompt_token_count}")
         print(f"[出力トークン数] {usage.candidates_token_count}")
+        print(f"[model_version] {response.model_version}")
     else:
         print("[トークン数] 利用量情報なし")
 
