@@ -12,6 +12,7 @@
 """
 
 import argparse
+import time
 
 from google import genai
 from google.genai import errors
@@ -23,14 +24,18 @@ DEFAULT_QUESTION = "AIE2026の講座の宿題にある「3レベル」とは何�
 
 
 def ask(question: str) -> str:
-    response = generate_response(question)
+    response, elapsed = generate_response(question)
+    print(f"[応答時間] {elapsed:.2f} 秒")
     print_usage(response)
     return response.text
 
 
 def generate_response(question: str):
     client = genai.Client(api_key=get_api_key())
-    return client.models.generate_content(model=MODEL, contents=question)
+    start_time = time.perf_counter()
+    response = client.models.generate_content(model=MODEL, contents=question)
+    elapsed = time.perf_counter() - start_time
+    return response, elapsed
 
 
 def print_usage(response) -> None:
@@ -60,8 +65,11 @@ def chat() -> None:
         if not question.strip():
             continue
 
+        start_time = time.perf_counter()
         response = session.send_message(question)
+        elapsed = time.perf_counter() - start_time
         print(f"[回答] {response.text}")
+        print(f"[応答時間] {elapsed:.2f} 秒")
         print_usage(response)
         print()
 
@@ -84,8 +92,9 @@ def main() -> None:
     print(f"[model] {MODEL}")
     print(f"[質問] {args.question}\n")
     try:
-        response = generate_response(args.question)
+        response, elapsed = generate_response(args.question)
         print(response.text)
+        print(f"[応答時間] {elapsed:.2f} 秒")
         print_usage(response)
     except errors.APIError as e:
         print(api_error_message(e.code, e.message))
