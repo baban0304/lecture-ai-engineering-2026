@@ -44,5 +44,6 @@ def test_chat_sends_follow_up_messages_in_the_same_session(monkeypatch, capsys):
 
     assert client.chats.session.messages == ["first question", "follow-up"]
     output = capsys.readouterr().out
-    assert output.index("[回答] answer to follow-up") < output.index("[入力トークン数] 12")
+    follow_up = output.index("[回答] answer to follow-up")
+    assert "[入力トークン数] 12" in output[follow_up:]    
     assert "[出力トークン数] 34" in output
