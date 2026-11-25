@@ -17,7 +17,7 @@ import sqlite_vec
 from app.config import (
     EMBEDDING_DIMENSIONS, EMBEDDING_MAX_TOKENS, EMBEDDING_MODEL,
     RAG_DB, RAG_DOCUMENT_IDS, RAG_SOURCE, RAG_TOP_K, RAG_TREE, get_api_key,
-    RAG_GRAPH, GRAPH_START_K, GRAPH_HOPS, GRAPH_MAX_RESULTS,
+    RAG_GRAPH, GRAPH_START_K, GRAPH_HOPS, GRAPH_MAX_RESULTS, RAG_NEIGHBOR_PAGES,
 )
 
 
@@ -124,18 +124,42 @@ def open_index(path: Path):
         db.close()
 
 
-def search(query: str) -> list[dict]:
-    """質問を埋め込み、近いページを最大RAG_TOP_K件返す。"""
+def search(query: str, neighbors: int = RAG_NEIGHBOR_PAGES) -> list[dict]:
+    """質問を埋め込み、近いページを最大RAG_TOP_K件返す。
+
+    neighborsが1以上なら、各ページの前後neighborsページの本文も付ける（宿題・実装）。
+    前後ページは同じ資料の中だけから取り、同じページは1回だけ返す。
+    """
     if not isinstance(query, str) or not query.strip():
         raise ValueError("検索語が空です。")
+    columns = "page_id, document_id, lecture, document_title, section, title, page, content"
     with open_index(RAG_DB) as db:
-        vector = embed_text(query.strip(), "RETRIEVAL_QUERY")
-        rows = db.execute("""
-            SELECT page_id, document_id, lecture, document_title, section, title, page, content,
-                   vec_distance_cosine(embedding, ?) AS distance
+        vector = sqlite_vec.serialize_float32(embed_text(query.strip(), "RETRIEVAL_QUERY"))
+        rows = db.execute(f"""
+            SELECT {columns}, vec_distance_cosine(embedding, ?) AS distance
             FROM chunks ORDER BY distance, page_id LIMIT ?
-        """, (sqlite_vec.serialize_float32(vector), RAG_TOP_K))
-        return [dict(row) for row in rows]
+        """, (vector, RAG_TOP_K))
+        hits = [dict(row) for row in rows]
+        if neighbors <= 0:
+            return hits
+
+        # ここから追加: ヒットした順に「前ページ → ヒット → 後ページ」と並べる。
+        hit_ids = {hit["page_id"] for hit in hits}
+        results, seen = [], set()
+        for hit in hits:
+            rows = db.execute(f"""
+                SELECT {columns}, vec_distance_cosine(embedding, ?) AS distance
+                FROM chunks WHERE document_id = ? AND page BETWEEN ? AND ? ORDER BY page
+            """, (vector, hit["document_id"], hit["page"] - neighbors, hit["page"] + neighbors))
+            for row in rows:
+                page = dict(row)
+                if page["page_id"] in seen:  # 重複させない
+                    continue
+                seen.add(page["page_id"])
+                # hit: ベクトル検索で選ばれたページ / neighbor: 前後として付けたページ
+                page["source"] = "hit" if page["page_id"] in hit_ids else "neighbor"
+                results.append(page)
+        return results
 
 
 def search_graph(query: str) -> dict:
@@ -151,7 +175,7 @@ def search_graph(query: str) -> dict:
             adjacent[a].add(b)
             adjacent[b].add(a)
 
-    seeds = [hit for hit in search(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
+    seeds = [hit for hit in search(query, neighbors=0) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
     seed_ids = {seed["page_id"] for seed in seeds}
     results, candidates = [], {}
     for rank, seed in enumerate(seeds):
@@ -208,4 +232,5 @@ if __name__ == "__main__":
         print(f"章: {result['section']}")
         print(f"タイトル: {result['title']}")
         print(f"ページ: {result['page']}")
+        print(f"種別: {'前後ページ' if result.get('source') == 'neighbor' else '検索ヒット'}")
         print(f"\n{result['content']}")
