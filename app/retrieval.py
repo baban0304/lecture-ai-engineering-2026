@@ -17,7 +17,7 @@ import sqlite_vec
 from app.config import (
     EMBEDDING_DIMENSIONS, EMBEDDING_MAX_TOKENS, EMBEDDING_MODEL,
     RAG_DB, RAG_DOCUMENT_IDS, RAG_SOURCE, RAG_TOP_K, RAG_TREE, get_api_key,
-    RAG_GRAPH, GRAPH_START_K, GRAPH_HOPS, GRAPH_MAX_RESULTS, RAG_NEIGHBOR_PAGES,
+    RAG_GRAPH, GRAPH_START_K, GRAPH_HOPS, GRAPH_MAX_RESULTS, GRAPH_TERM_SLOTS, RAG_NEIGHBOR_PAGES,
 )
 
 
@@ -162,6 +162,15 @@ def search(query: str, neighbors: int = RAG_NEIGHBOR_PAGES) -> list[dict]:
         return results
 
 
+def query_distances(query: str) -> dict:
+    """質問文と、索引にある全ページとの距離を返す（宿題・発展）。"""
+    with open_index(RAG_DB) as db:
+        vector = sqlite_vec.serialize_float32(embed_text(query.strip(), "RETRIEVAL_QUERY"))
+        rows = db.execute(
+            "SELECT page_id, vec_distance_cosine(embedding, ?) AS distance FROM chunks", (vector,))
+        return {row["page_id"]: row["distance"] for row in rows}
+
+
 def search_graph(query: str) -> dict:
     """ベクトル検索を入口に、前後ページと共通用語で候補を広げる。"""
     pages = {page["page_id"]: page for page in load_pages(RAG_SOURCE)}
@@ -205,8 +214,42 @@ def search_graph(query: str) -> dict:
                 if neighbor not in candidates or priority < candidates[neighbor][0]:
                     candidates[neighbor] = (priority, candidate)
     expanded = [candidate for _, candidate in sorted(candidates.values())]
-    return {"seeds": results, "expanded": expanded[:max(0, GRAPH_MAX_RESULTS - len(results))],
-            "max_hops": GRAPH_HOPS}
+    limit = max(0, GRAPH_MAX_RESULTS - len(results))
+
+    # 発展：用語経由の候補に専用の枠を取り、
+    # 入口と珍しい用語を多く共有するページを優先する。
+    term_slots = min(GRAPH_TERM_SLOTS, limit)
+    shared = defaultdict(set)
+    for seed in seeds:
+        for term in adjacent[seed["page_id"]]:
+            if nodes[term]["kind"] != "term":
+                continue
+            for page_id in adjacent[term]:
+                if page_id in pages and page_id not in seed_ids:
+                    shared[page_id].add(term)
+
+    # 第2版：用語で集めた候補を、質問に近い順に並べる。
+    distances = query_distances(query) if term_slots and shared else {}
+
+    neighbor_part = expanded[:limit - term_slots]
+    taken = {candidate["page_id"] for candidate in neighbor_part}
+    term_part = []
+    for page_id in sorted(shared, key=lambda p: (distances.get(p, 2.0), p)):
+        if len(term_part) >= term_slots:
+            break
+        if page_id in taken:
+            continue
+        terms = sorted(shared[page_id], key=lambda t: (len(adjacent[t]), t))
+        root = next(s["page_id"] for s in seeds if terms[0] in adjacent[s["page_id"]])
+        term_part.append({**pages[page_id], "hops": 2,
+                          "path": [{"id": n, "title": nodes[n]["title"]}
+                                   for n in (root, terms[0], page_id)],
+                           "shared_terms": [nodes[t]["title"] for t in terms],
+                           "distance": distances.get(page_id)})
+        taken.add(page_id)
+    rest = [c for c in expanded if c["page_id"] not in taken]
+    expanded = (neighbor_part + term_part + rest)[:limit]
+    return {"seeds": results, "expanded": expanded, "max_hops": GRAPH_HOPS}
 
 
 
